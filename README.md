@@ -1,5 +1,7 @@
 # dsh-paper-translate
 
+[![npm](https://img.shields.io/npm/v/dsh-paper-translate)](https://www.npmjs.com/package/dsh-paper-translate)
+
 把英文论文 PDF 译成中文 DOCX，**按原版式重排**：插图、图注、三线表、公式、参考文献位置不变，参考文献正文保留英文不译。
 
 这是 paper-translate 技能流水线的 DeepSeek Harness 插件封装 —— 插件是壳，真正的解析、重建、校验逻辑在 `python/` 目录里。
@@ -20,23 +22,15 @@
 
 ## 安装
 
-### 1. 依赖
-
-```bash
-cd <插件目录>
-python -m venv .venv
-.venv/bin/pip install -r python/requirements.txt        # Windows: .venv\Scripts\pip
-```
-
-需要 Python 3.10+，三个依赖共约 25 MB：`pymupdf`、`python-docx`、`pillow`。
-
-### 2. 注册为 Harness 插件
+### 1. 安装插件
 
 ```bash
 cd ~/.dsh/profiles/desktop          # Windows: %USERPROFILE%\.dsh\profiles\desktop
-pnpm add link:<插件目录绝对路径>
-# 或从 GitHub 安装
-pnpm add github:<用户名>/dsh-paper-translate
+
+pnpm add dsh-paper-translate        # 从 npm 安装（推荐）
+pnpm add dsh-paper-translate@0.1.0  # 锁定版本
+pnpm add github:linlinxxy77-hue/dsh-paper-translate   # 从 GitHub 源码
+pnpm add link:<插件目录绝对路径>      # 本地开发
 ```
 
 然后在同一个 `package.json` 的 `dsh.profile.bundles` 数组末尾加一行：
@@ -46,6 +40,20 @@ pnpm add github:<用户名>/dsh-paper-translate
 ```
 
 重启 Harness（完全退出再打开，不是刷新窗口）。
+
+> npm 上的版本是预构建产物，安装时不需要编译，也不用点 `allowBuilds` 授权；从 GitHub 源码安装会走 pnpm 的源码拉取，国内网络更慢。
+
+### 2. 安装 Python 依赖
+
+```bash
+cd node_modules/dsh-paper-translate   # Windows: node_modules\dsh-paper-translate
+python -m venv .venv
+.venv/bin/pip install -r python/requirements.txt        # Windows: .venv\Scripts\pip
+```
+
+需要 Python 3.10+，三个依赖共约 25 MB：`pymupdf`、`python-docx`、`pillow`。
+
+插件也会自己找项目内的 `.venv`，装在别处的话用 `config.json` 的 `pythonPath` 指过去。
 
 ### 3. 验证
 
