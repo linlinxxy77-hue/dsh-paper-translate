@@ -1,0 +1,10 @@
+# paper-translate 运行时依赖
+# 安装方式二选一：
+#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   python env_check.py --bootstrap        # 自动在指定目录建 venv 并安装
+#
+# 上限不是摆设：pymupdf 2.1 已实测可用（get_drawings / get_text 行为不变），
+# 但 3.x 若再改返回结构，图区检测会静默退化 —— 届时先跑回归测试再决定是否放开。
+pymupdf>=1.23,<3
+python-docx>=1.1,<2
+pillow>=9.0,<14

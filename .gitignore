@@ -1,0 +1,14 @@
+# 依赖与运行时
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# 本机配置与运行状态
+config.json
+data/
+
+# 产物
+*.docx
+*.pdf
+build/

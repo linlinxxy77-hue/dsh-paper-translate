@@ -1,0 +1,42 @@
+{
+  "name": "dsh-paper-translate",
+  "version": "0.1.0",
+  "description": "论文 PDF 中译（版式保留）：把 paper-translate skill 的 Python 脚本暴露为 DeepSeek Harness 工具",
+  "author": "linlinxxy77-hue",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "files": [
+    "src",
+    "python",
+    "cordis.patch.yml",
+    "config.example.json",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.3"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.3 <0.3.0",
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linlinxxy77-hue/dsh-paper-translate.git"
+  },
+  "homepage": "https://github.com/linlinxxy77-hue/dsh-paper-translate#readme",
+  "bugs": {
+    "url": "https://github.com/linlinxxy77-hue/dsh-paper-translate/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "pdf",
+    "translation",
+    "deepseek-harness"
+  ]
+}
