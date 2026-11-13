@@ -40,7 +40,12 @@ function resolveWork(input) {
 
 function contentOf(work) {
   const file = path.join(work, 'content.json');
-  if (!fs.existsSync(file)) throw new Error(`${work} 里没有 content.json，先跑 paper_prepare。`);
+  if (!fs.existsSync(file)) {
+    if (readState().mode === 'summary') {
+      throw new Error(`${work} 是「仅总结」工作目录，本次没有生成待译项。要全文翻译就用 paper_prepare 重新准备一次（不要传 mode=summary）。`);
+    }
+    throw new Error(`${work} 里没有 content.json，先跑 paper_prepare。`);
+  }
   return file;
 }
 
@@ -79,10 +84,11 @@ export function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'paper_prepare',
-    description: '解析论文 PDF：抽取文本块与版式、定位图区与图形摘要并裁图、重建表格网格，生成 content.json/source.json。这是翻译流程第一步，只需跑一次；重复调用会复用已有工作目录继续。缺依赖时会停下并给出清单——此时先告知用户再决定是否安装，不要自行 pip install。',
+    description: '解析论文 PDF：抽取文本块与版式、定位图区与图形摘要并裁图、重建表格网格，生成 content.json/source.json。这是翻译流程第一步，只需跑一次；重复调用会复用已有工作目录继续。mode="summary" 时只抽取+裁图、不生成待译项（用户只要总结不要翻译时用这个）。缺依赖时会停下并给出清单——此时先告知用户再决定是否安装，不要自行 pip install。',
     parameters: {
       pdf: { ...str, required: true, description: '本地论文 PDF 的绝对路径' },
       workdir: { ...str, description: '工作目录绝对路径；省略则用 build/papers/<文件名>' },
+      mode: { ...str, description: 'translate（默认，全文翻译）或 summary（只总结：不建译文骨架、不产生待译项）' },
     },
     output: asText({ work: str, reused: bool }),
     async execute(args, exec) {
@@ -90,20 +96,25 @@ export function apply(ctx) {
       if (!pdf) throw new Error('pdf 不能为空。');
       if (!fs.existsSync(pdf)) throw new Error(`找不到 PDF：${pdf}`);
       if (!/\.pdf$/i.test(pdf)) throw new Error(`不是 PDF 文件：${pdf}`);
+      const mode = String(args.mode ?? 'translate').trim() === 'summary' ? 'summary' : 'translate';
       const work = args.workdir ? path.resolve(args.workdir) : workDirFor(pdf);
       const reused = fs.existsSync(path.join(work, 'content.json'));
-      const r = await runPy('run.py', ['prepare', pdf, work], { timeoutMs: 300000, signal: exec?.signal });
+      const argv = ['prepare', pdf, work];
+      if (mode === 'summary') argv.push('--mode', 'summary');
+      const r = await runPy('run.py', argv, { timeoutMs: 300000, signal: exec?.signal });
       if (r.code === 2) throw fail('缺少 Python 依赖，已停在准备阶段。把下面清单告知用户并等确认，不要自行安装。', r);
       if (r.code !== 0) throw fail(`准备失败（退出码 ${r.code}）。`, r);
-      writeState({ lastWork: work, lastPdf: pdf });
+      writeState({ lastWork: work, lastPdf: pdf, mode });
       const log = stripCli(`${r.stdout || ''}${r.stderr || ''}`);
       return {
         text: [
-          reused ? '复用已有工作目录（续译，不会覆盖已填译文）' : '准备完成',
+          mode === 'summary' ? '准备完成（仅总结模式：没有生成待译项）' : (reused ? '复用已有工作目录（续译，不会覆盖已填译文）' : '准备完成'),
           '',
           log,
           '',
-          '下一步：paper_terms 看术语口径 → paper_next 取第一批原文。',
+          mode === 'summary'
+            ? '下一步：paper_summary_brief 取素材包（含图注候选）→ 写五节 + 图解读 → paper_summary_write → paper_summary_doc。不要调用 paper_next/paper_fill。'
+            : '下一步：paper_terms 看术语口径 → paper_next 取第一批原文。',
         ].join('\n'),
         work,
         reused,
@@ -289,14 +300,18 @@ export function apply(ctx) {
     },
   }));
 
-  // ---- 文献总结：默认不跑，只有用户提到「总结/概括」才触发 ----
+  // ---- 文献总结：默认不做，只有用户提到「总结/概括」才触发 ----
+  // 用户只要总结、没提翻译时：把 pdf 直接传进来，一步完成「仅总结准备 + 素材包」，
+  // 不生成待译项，也就不可能滑进全文翻译。
   ctx.tools.register(defineTool({
     name: 'paper_summary_brief',
-    description: '【默认不做总结，别主动调用】仅当用户明确要求「总结/概括/归纳/提炼/综述/summary」这篇（或这批）文献时才调用。它切出约 8–10k 字符的摘要素材包（摘要全文 + 引言/讨论/结果要点 + 方法小节 + 术语口径），供你写五节中文总结：目的、方法、难点、创新、局限。不读全文、不产生译文、不花排版时间。返回里自带输出格式与硬规则，照着写即可。',
+    description: '【只总结不翻译的入口】用户要求「总结/概括/归纳/提炼/讲了什么/主要结论/summary」而没提翻译时用它：传 pdf 会在一步内完成轻量准备（只抽取+裁图，不生成待译项）并切出素材包。素材包 ≈1.3 万字符：摘要 + 引言/讨论/结果要点 + 方法小节 + 术语口径 + 图表候选（图注按子图保留、正文引用次数、表格网格）。据此写五节中文总结（目的/方法/难点/创新/局限）+ 1–3 张图的解读，不读全文、不产生译文、不做全文翻译。返回里自带输出格式与硬规则。默认不做总结，没有总结类关键词就跳过。',
     parameters: {
-      workdir: { ...str, description: '工作目录；省略用上一次的目录' },
+      workdir: { ...str, description: '工作目录；省略用上一次的目录（与 pdf 同时给时以 workdir 为准）' },
+      pdf: { ...str, description: '论文 PDF 绝对路径。用户只想要总结时直接传它，省掉单独的 paper_prepare' },
       intent: { ...str, description: '用户这次的原话。传入后若未出现总结类关键词，直接跳过、不生成素材包' },
       budget: { ...int, description: '素材包字符预算，默认 10000' },
+      max_figs: { ...int, description: '总结文档最多放几张图/表，默认 3；0 = 纯文字（更快更省）' },
     },
     output: asText({ work: str, hit: bool }),
     async execute(args, exec) {
@@ -310,16 +325,37 @@ export function apply(ctx) {
           };
         }
       }
-      const work = resolveWork(args.workdir);
+      const figs = Math.min(Math.max(Number(args.max_figs ?? 3) || 0, 0), 6);
+      let work = '';
+      let prep = '';
+      const pdf = String(args.pdf ?? '').trim();
+      if (pdf) {
+        const abs = path.resolve(pdf);
+        if (!fs.existsSync(abs)) throw new Error(`找不到 PDF：${abs}`);
+        work = args.workdir ? path.resolve(args.workdir) : workDirFor(abs);
+        const argv = ['prepare', abs, work, '--mode', 'summary'];
+        if (!figs) argv.push('--no-crop');
+        const p = await runPy('run.py', argv, { timeoutMs: 300000, signal: exec?.signal });
+        if (p.code === 2) throw fail('缺少 Python 依赖，已停在准备阶段。把下面清单告知用户并等确认，不要自行安装。', p);
+        if (p.code !== 0) throw fail(`准备失败（退出码 ${p.code}）。`, p);
+        writeState({ lastWork: work, lastPdf: abs, mode: 'summary' });
+        prep = stripCli(`${p.stdout || ''}${p.stderr || ''}`);
+      } else {
+        work = resolveWork(args.workdir);
+      }
       const n = Math.min(Math.max(Number(args.budget ?? 10000) || 10000, 3000), 20000);
-      const r = await runPy('run.py', ['summary', work, '--budget', String(n)], { timeoutMs: 120000, signal: exec?.signal });
+      const r = await runPy('run.py', ['summary', work, '--budget', String(n), '--figs', String(figs)], { timeoutMs: 120000, signal: exec?.signal });
       const body = stripCli(`${r.stdout || ''}${r.stderr || ''}`);
       if (r.code !== 0) throw fail('素材包生成失败。', r);
       return {
         text: [
+          ...(prep ? ['', prep, ''] : []),
           body,
           '',
           '—— 写完后把 JSON 交给 paper_summary_write（workdir 同上，summary 传 JSON 文本）。',
+          figs
+            ? `图表：从 [FIG n]/[TAB n] 候选里选 1–${figs} 张承载核心主张的，每张写 why + read + anchor（anchor 必须逐字来自该图图注）。`
+            : '本次 max_figs=0，figures 传空数组即可。',
           '多篇一起总结时：每篇各跑一次 brief + write，最后 paper_summary_doc 传所有 workdir。',
         ].join('\n'),
         work, hit: true,
@@ -329,10 +365,10 @@ export function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'paper_summary_write',
-    description: '提交文献总结的五节内容：解析 JSON、写入 <work>/summary.json，并当场做六项机械校验（节齐全与字数、证据逐字命中原文、数字来自原文、中文纯度、英文标题可溯源、节间重复）。校验不通过会指出哪一节、哪条不达标，改完再提交一次即可。',
+    description: '提交文献总结：解析 JSON、写入 <work>/summary.json，并当场做机械校验——五节（齐全与字数、证据逐字命中原文、数字来自原文、中文纯度、英文标题可溯源、节间重复）+ 图表（图号是否真实存在、解读字数、anchor 是否逐字来自该图图注、子图字母、是否描述了图注没写的视觉细节）。校验不通过会指出哪一节/哪张图、哪条不达标，改完再提交一次即可。',
     parameters: {
       workdir: { ...str, description: '工作目录；省略用上一次的目录' },
-      summary: { ...str, description: '五节总结 JSON 文本（可带 ```json 代码块）' },
+      summary: { ...str, description: '五节总结 + figures 的 JSON 文本（可带 ```json 代码块）' },
     },
     output: asText({ work: str, ok: bool, code: int }),
     async execute(args, exec) {
@@ -365,7 +401,7 @@ export function apply(ctx) {
 
   ctx.tools.register(defineTool({
     name: 'paper_summary_doc',
-    description: '把已通过校验的 summary.json 排成【总结】DOCX（单篇=一篇五节；多篇=目录 + 每篇中英文名与五节，自动分页），可选导出 PDF。文件名自动取「译文名/中文标题 [总结]」，也可用 out 指定。',
+    description: '把已通过校验的 summary.json 排成【总结】DOCX：五节 + 关键图表（原图/表截图 + 中文解读 + 英文原图注供核对，图注未裁出时自动降级为纯文字）。单篇=一篇；多篇=目录 + 每篇中英文名、五节与图表，自动分页。可选导出 PDF。文件名自动取「译文名/中文标题 [总结]」，也可用 out 指定。',
     parameters: {
       workdirs: { type: 'array', items: { type: 'string' }, description: '一个或多个工作目录（多篇即批量）' },
       out: { ...str, description: '输出 docx 绝对路径；省略则自动命名' },

@@ -3,12 +3,14 @@
 
 用法:
     python run.py prepare <论文.pdf> <工作目录>      # 自检 → 抽取 → 骨架 → 裁图
+    python run.py prepare <论文.pdf> <工作目录> --mode summary [--no-crop]
+                                                     # 仅总结：不建译文骨架
     python run.py audit <工作目录> [n]               # 抽检 n 条，原文与译文并排
     python run.py finish <工作目录> [out.docx]       # 排版 → 自检（+ 可选导 PDF）
     python run.py harvest <工作目录>                 # 译完沉淀术语候选（补中文后 --merge）
 
 文献总结（默认不跑，用户提到「总结/概括」时才用）:
-    python run.py summary <工作目录>                 # 切素材包，交给模型写五节
+    python run.py summary <工作目录> [--figs 3]      # 切素材包（含图注候选），交给模型写五节
     python run.py summary-check <工作目录>           # 校验 summary.json（六项）
     python run.py summary-doc <工作目录...> [-o out.docx] [--pdf]
 
@@ -39,11 +41,14 @@ def line_with(text, *keys):
     return ""
 
 
-def prepare(pdf, work):
+def prepare(pdf, work, mode="translate", nocrop=False):
+    """mode=summary：只抽取（+裁图），不建译文骨架（用户只要总结时用）。"""
     if not os.path.exists(pdf):
         print("! 找不到 PDF:", pdf)
         return 1
     os.makedirs(work, exist_ok=True)
+    summary_only = mode == "summary"
+    steps = 2 if (summary_only and nocrop) else 3 if summary_only else 4
 
     rc, out = call("env_check.py")
     if rc != 0:
@@ -51,36 +56,47 @@ def prepare(pdf, work):
         print("\n[停] 依赖未就绪，先按上面的清单处理，再重跑 prepare。")
         return 2
     py = line_with(out, "PYTHON")
-    print("[1/4] 环境 OK ", py.replace("PYTHON", "").strip())
+    print(f"[1/{steps}] 环境 OK ", py.replace("PYTHON", "").strip())
 
     rc, out = call("extract.py", pdf, work)
     if rc != 0:
         print(out.strip())
         return 3
     stats = line_with(out, "\"blocks\"")
-    print("[2/4] 抽取   ", stats or out.strip().splitlines()[0])
+    print(f"[2/{steps}] 抽取   ", stats or out.strip().splitlines()[0])
 
     spath = os.path.join(work, "structure.json")
     cpath = os.path.join(work, "content.json")
-    rc, out = call("make_skeleton.py", spath, cpath)
-    if rc != 0:
-        print(out.strip())
-        return 4
-    todo = line_with(out, "待翻译").replace("待翻译:", "").split("；")[0].strip()
-    pre = line_with(out, "已预填").replace("已预填:", "").split("（")[0].strip()
-    print(f"[3/4] 骨架    待译 {todo} ｜ 已预填 {pre}")
+    if summary_only:
+        print("      （仅总结模式：不生成待译项，也就不走全文翻译）")
+    else:
+        rc, out = call("make_skeleton.py", spath, cpath)
+        if rc != 0:
+            print(out.strip())
+            return 4
+        todo = line_with(out, "待翻译").replace("待翻译:", "").split("；")[0].strip()
+        pre = line_with(out, "已预填").replace("已预填:", "").split("（")[0].strip()
+        print(f"[3/{steps}] 骨架    待译 {todo} ｜ 已预填 {pre}")
 
-    rc, out = call("crop_figs.py", pdf, spath, os.path.join(work, "figs"))
-    if rc != 0:
-        print(out.strip())
-        return 5
-    crop = line_with(out, "crop:")
-    print("[4/4] 裁图   ", crop.replace("crop:", "").strip() or "完成")
-    warn = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("!")]
-    for w in warn:
-        print("      ", w)
+    if nocrop:
+        print("       （--no-crop：跳过裁图，纯文字总结更快）")
+    else:
+        rc, out = call("crop_figs.py", pdf, spath, os.path.join(work, "figs"))
+        if rc != 0:
+            print(out.strip())
+            return 5
+        crop = line_with(out, "crop:")
+        print(f"[{steps}/{steps}] 裁图   ", crop.replace("crop:", "").strip() or "完成")
+        warn = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("!")]
+        for w in warn:
+            print("      ", w)
 
     print(f"\n工作目录: {os.path.abspath(work)}")
+    if summary_only:
+        print("下一步（只做总结，不翻译）:")
+        figs = "0" if nocrop else "3"
+        print(f'  python "{os.path.join(HERE, "run.py")}" summary "{work}" --figs {figs}')
+        return 0
     print("下一步（分批翻译，模型只输出译文）:")
     print(f'  python "{os.path.join(HERE, "fill.py")}" "{cpath}" --next 20')
     return 0
@@ -260,10 +276,24 @@ def main():
         return 1
     cmd = argv[0]
     if cmd == "prepare":
-        if len(argv) < 3:
-            print("usage: run.py prepare <pdf> <workdir>")
+        rest, mode, nocrop, pos, i = argv[1:], "translate", False, [], 0
+        while i < len(rest):
+            a = rest[i]
+            if a == "--mode" and i + 1 < len(rest):
+                mode, i = rest[i + 1], i + 2
+                continue
+            if a.startswith("--mode="):
+                mode, i = a.split("=", 1)[1], i + 1
+                continue
+            if a == "--no-crop":
+                nocrop = True
+            elif not a.startswith("-"):
+                pos.append(a)
+            i += 1
+        if len(pos) < 2:
+            print("usage: run.py prepare <pdf> <workdir> [--mode summary] [--no-crop]")
             return 1
-        return prepare(argv[1], argv[2])
+        return prepare(pos[0], pos[1], mode, nocrop)
     if cmd == "finish":
         if len(argv) < 2:
             print("usage: run.py finish <workdir> [out.docx]")

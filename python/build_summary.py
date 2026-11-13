@@ -13,6 +13,7 @@
 import datetime
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +34,47 @@ LIGHT = RGBColor(0x80, 0x80, 0x80)
 SECTIONS = [("purpose", "研究目的"), ("methods", "研究方法"), ("difficulty", "研究难点"),
             ("novelty", "创新点"), ("limitation", "局限")]
 CN_NUM = "一二三四五六七八九十"
+IMG_W = 15.0          # 图片版心宽度上限（cm）
+IMG_H = 19.0          # 单张高度上限，避免长条图把整页撑走
+
+
+def fig_png(workdir, n, kind, fallback_name=""):
+    """图/表截图：figs/fig4.png、figs/table1.png；老工作目录可能只有旧文件名。"""
+    base = "table" if kind == "table" else "fig"
+    for name in (f"{base}{n}.png", fallback_name):
+        if name:
+            p = os.path.join(workdir, "figs", name)
+            if os.path.exists(p):
+                return p
+    folder = os.path.join(workdir, "figs")
+    if os.path.isdir(folder):                      # 兜底：同目录下任意 fig<n>*
+        for f in sorted(os.listdir(folder)):
+            if f.lower().startswith(f"{base}{n}") and f.lower().endswith(".png"):
+                return os.path.join(folder, f)
+    return ""
+
+
+def caption_of(workdir, n, kind):
+    """英文原图注（用于「可核对」的灰字），取 structure.json 的图注块。"""
+    st = os.path.join(workdir, "structure.json")
+    if not os.path.exists(st):
+        return ""
+    try:
+        blocks = json.load(open(st, encoding="utf-8")).get("blocks") or []
+    except Exception:
+        return ""
+    want = "table" if kind == "table" else "fig"
+    for b in blocks:
+        if b.get("type") != "caption":
+            continue
+        m = re.match(r"\s*(Fig(?:ure)?\.?|Table)\s*0*(\d+)", b.get("text") or "", re.I)
+        if not m:
+            continue
+        got = "table" if m.group(1).lower().startswith("tab") else "fig"
+        if got == want and int(m.group(2)) == int(n):
+            text = re.sub(r"\(\s*([A-H])\s*\)", r"(\1)", b["text"])
+            return re.sub(r"\s+", " ", text).strip()
+    return ""
 
 
 def load_one(workdir):
@@ -171,11 +213,60 @@ def make_doc(rows, out):
             h2(f"{CN_NUM[idx]}、{label}")
             body(text, gray=("未明确" in text[:12]))
 
+        figs = [f for f in (S.get("figures") or []) if isinstance(f, dict) and f.get("n") is not None]
+        if figs:
+            h1("关键图表")
+            for f in figs:
+                n = str(f.get("n")).strip()
+                kind = "table" if str(f.get("kind") or "").lower() in ("tab", "table", "表") else "fig"
+                tag = "表" if kind == "table" else "图"
+                why = (f.get("why") or "").strip()
+                read = (f.get("read") or "").strip()
+                png = fig_png(S["_workdir"], n, kind)
+                if png:
+                    place_picture(doc, png)
+                else:
+                    note(f"（{tag} {n} 的原图未能裁出，只保留解读；可回工作目录 figs/ 查看）")
+                q = doc.add_paragraph()
+                q.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                set_spacing(q, 4, 3, 1.2)
+                q.paragraph_format.keep_with_next = True
+                add_rich_text(q, f"{tag} {n}" + (f"｜{why}" if why else ""),
+                              size=10.5, cn=CN_HEAD, bold=True)
+                if read:
+                    body(read)
+                cap = caption_of(S["_workdir"], n, kind)
+                if cap:
+                    note("原图注：" + (cap[:700] + ("…" if len(cap) > 700 else "")))
+
         note("本总结由 paper-translate 依据原文自动生成，供快速把握文献要点；"
              "涉及具体数值与结论请核对原文。")
 
     doc.save(out)
     return out
+
+
+def place_picture(doc, png):
+    """插入图片：宽 ≤15 cm、高 ≤19 cm，且不放大到 300dpi 以上（免得糊）。"""
+    w = h = 0
+    try:
+        from PIL import Image
+        w, h = Image.open(png).size
+    except Exception:
+        pass
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.keep_with_next = True
+    set_spacing(p, 10, 0, 1.0)
+    run = p.add_run()
+    if w and h:
+        # 300 dpi 截图按原尺寸约 13.5 cm；允许放大到 1.35 倍填满版心，再大就会发虚
+        max_w = min(IMG_W, w / 300.0 * 2.54 * 1.35)
+        scale = min(max_w / w, IMG_H / h)
+        run.add_picture(png, width=Cm(w * scale), height=Cm(h * scale))
+    else:
+        run.add_picture(png, width=Cm(IMG_W))
+    return p
 
 
 def qn_eastasia():
