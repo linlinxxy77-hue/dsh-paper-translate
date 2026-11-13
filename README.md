@@ -44,6 +44,9 @@ pnpm add link:<插件目录绝对路径>      # 本地开发
 
 > npm 上的版本是预构建产物，安装时不需要编译，也不用点 `allowBuilds` 授权；从 GitHub 源码安装会走 pnpm 的源码拉取，国内网络更慢。
 
+版本历史见 [CHANGELOG.md](CHANGELOG.md)。GitHub 上每个版本都有独立 tag（`v0.1.0`、`v0.1.1`…），旧版本可用
+`git checkout v0.1.0` 或下载对应 tag 的压缩包，不会被新版本覆盖。
+
 ### 2. 安装 Python 依赖
 
 ```bash

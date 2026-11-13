@@ -1,6 +1,6 @@
 {
   "name": "dsh-paper-translate",
-  "version": "0.1.2",
+  "version": "0.1.1",
   "description": "论文 PDF 中译（版式保留）与文献总结：把 paper-translate skill 的 Python 脚本暴露为 DeepSeek Harness 工具",
   "author": "linlinxxy77-hue",
   "license": "MIT",
@@ -11,7 +11,8 @@
     "python",
     "cordis.patch.yml",
     "config.example.json",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "bundle": {
