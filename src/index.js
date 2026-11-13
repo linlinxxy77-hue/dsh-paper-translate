@@ -288,4 +288,103 @@ export function apply(ctx) {
       return { text: body, work };
     },
   }));
+
+  // ---- 文献总结：默认不跑，只有用户提到「总结/概括」才触发 ----
+  ctx.tools.register(defineTool({
+    name: 'paper_summary_brief',
+    description: '【默认不做总结，别主动调用】仅当用户明确要求「总结/概括/归纳/提炼/综述/summary」这篇（或这批）文献时才调用。它切出约 8–10k 字符的摘要素材包（摘要全文 + 引言/讨论/结果要点 + 方法小节 + 术语口径），供你写五节中文总结：目的、方法、难点、创新、局限。不读全文、不产生译文、不花排版时间。返回里自带输出格式与硬规则，照着写即可。',
+    parameters: {
+      workdir: { ...str, description: '工作目录；省略用上一次的目录' },
+      intent: { ...str, description: '用户这次的原话。传入后若未出现总结类关键词，直接跳过、不生成素材包' },
+      budget: { ...int, description: '素材包字符预算，默认 10000' },
+    },
+    output: asText({ work: str, hit: bool }),
+    async execute(args, exec) {
+      const raw = String(args.intent ?? '').trim();
+      if (raw) {
+        const probe = await runPy('summarize.py', ['--intent', raw], { timeoutMs: 20000, signal: exec?.signal });
+        if (!/INTENT:\s*HIT/.test(`${probe.stdout || ''}`)) {
+          return {
+            text: `用户这句话里没有总结/概括类要求（原话：${raw}），按默认策略跳过，本次不生成总结。如确需总结，让用户明确说一句「总结一下这篇」。`,
+            work: '', hit: false,
+          };
+        }
+      }
+      const work = resolveWork(args.workdir);
+      const n = Math.min(Math.max(Number(args.budget ?? 10000) || 10000, 3000), 20000);
+      const r = await runPy('run.py', ['summary', work, '--budget', String(n)], { timeoutMs: 120000, signal: exec?.signal });
+      const body = stripCli(`${r.stdout || ''}${r.stderr || ''}`);
+      if (r.code !== 0) throw fail('素材包生成失败。', r);
+      return {
+        text: [
+          body,
+          '',
+          '—— 写完后把 JSON 交给 paper_summary_write（workdir 同上，summary 传 JSON 文本）。',
+          '多篇一起总结时：每篇各跑一次 brief + write，最后 paper_summary_doc 传所有 workdir。',
+        ].join('\n'),
+        work, hit: true,
+      };
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'paper_summary_write',
+    description: '提交文献总结的五节内容：解析 JSON、写入 <work>/summary.json，并当场做六项机械校验（节齐全与字数、证据逐字命中原文、数字来自原文、中文纯度、英文标题可溯源、节间重复）。校验不通过会指出哪一节、哪条不达标，改完再提交一次即可。',
+    parameters: {
+      workdir: { ...str, description: '工作目录；省略用上一次的目录' },
+      summary: { ...str, description: '五节总结 JSON 文本（可带 ```json 代码块）' },
+    },
+    output: asText({ work: str, ok: bool, code: int }),
+    async execute(args, exec) {
+      const work = resolveWork(args.workdir);
+      let text = String(args.summary ?? '').trim();
+      const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+      if (fenced) text = fenced[1].trim();
+      const a = text.indexOf('{');
+      const b = text.lastIndexOf('}');
+      if (a < 0 || b <= a) throw new Error('没有找到 JSON：请只输出 {"title_en":…,"sections":{…}} 这一份对象。');
+      let obj;
+      try {
+        obj = JSON.parse(text.slice(a, b + 1));
+      } catch (e) {
+        throw new Error(`JSON 解析失败：${e.message}\n常见原因：字符串里有未转义的换行或引号，请压成一行再提交。`);
+      }
+      const sec = obj.sections || {};
+      const need = ['purpose', 'methods', 'difficulty', 'novelty', 'limitation'];
+      const missing = need.filter((k) => !sec[k]);
+      if (missing.length) throw new Error(`缺section：${missing.join('、')}（五个都要，没有依据就写「原文未明确说明」）。`);
+      fs.writeFileSync(path.join(work, 'summary.json'), JSON.stringify(obj, null, 1), 'utf8');
+
+      const r = await runPy('run.py', ['summary-check', work], { timeoutMs: 60000, signal: exec?.signal });
+      const body = `${r.stdout || ''}${r.stderr || ''}`.trim();
+      const ok = r.code === 0;
+      const verdict = ok ? '校验通过。' : r.code === 1 ? '有疑点：可以交付，但逐条看上面提示，能改就改。' : '必检项未通过，按提示重写后重新提交。';
+      return { text: [`${verdict}（已写入 summary.json）`, '', body].join('\n'), work, ok, code: r.code };
+    },
+  }));
+
+  ctx.tools.register(defineTool({
+    name: 'paper_summary_doc',
+    description: '把已通过校验的 summary.json 排成【总结】DOCX（单篇=一篇五节；多篇=目录 + 每篇中英文名与五节，自动分页），可选导出 PDF。文件名自动取「译文名/中文标题 [总结]」，也可用 out 指定。',
+    parameters: {
+      workdirs: { type: 'array', items: { type: 'string' }, description: '一个或多个工作目录（多篇即批量）' },
+      out: { ...str, description: '输出 docx 绝对路径；省略则自动命名' },
+      pdf: { ...bool, description: '同时导出 PDF，默认 true' },
+    },
+    output: asText({ docx: str, pdf: str }),
+    async execute(args, exec) {
+      let dirs = Array.isArray(args.workdirs) ? args.workdirs.map((d) => path.resolve(String(d))) : [];
+      if (!dirs.length) dirs = [resolveWork('')];
+      const argv = ['summary-doc', ...dirs];
+      if (args.out) argv.push('-o', path.resolve(args.out));
+      if (args.pdf !== false) argv.push('--pdf');
+      const r = await runPy('run.py', argv, { timeoutMs: 420000, signal: exec?.signal });
+      const body = stripCli(`${r.stdout || ''}${r.stderr || ''}`);
+      if (r.code === 2) return { text: `总结还没通过必检项，已停下排版。\n\n${body}`, docx: '', pdf: '' };
+      if (r.code !== 0) throw fail('总结排版失败。', r);
+      const m = /交付:\s*(.+?)（\d+\s*篇）/.exec(body);
+      const docx = m ? m[1].trim() : (args.out ? path.resolve(args.out) : '');
+      return { text: body, docx, pdf: docx ? docx.replace(/\.docx$/i, '.pdf') : '' };
+    },
+  }));
 }

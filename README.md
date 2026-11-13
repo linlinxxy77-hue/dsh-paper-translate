@@ -17,6 +17,7 @@
 | 术语 | 每段各译各的 | 全文一张术语表，回填时逐条检查 |
 | 数字 | 可能改写成中文数字 | 逐项比对，缺一个就点名到段落 |
 | 抽检 | 无 | 按风险打分挑段落，原文译文并排复核 |
+| 总结 | 每次重读全文，口径不一 | 素材包 + 证据锚点，机械校验后才出稿 |
 
 代价是慢：一篇 13 页的论文约 10 分钟，绝大部分时间花在逐段翻译本身。
 
@@ -82,8 +83,26 @@ paper_prepare  →  paper_terms  →  paper_next  ─┐
 | `paper_audit` | 语义抽检，原文译文并排 |
 | `paper_finish` | 排版生成 DOCX、自检，可选导出 PDF |
 | `paper_harvest` | 抽取新术语候选，用于沉淀词表 |
+| `paper_summary_brief` | 切摘要素材包（默认不做，需用户说「总结」） |
+| `paper_summary_write` | 提交五节总结，六项机械校验 |
+| `paper_summary_doc` | 生成【总结】DOCX/PDF，多篇可合并 |
 
 工作目录默认落在 `~/paper-translate-work/build/papers/<篇名>/`，同一篇重复准备会复用，不会覆盖已填译文。
+
+### 文献总结（可选，默认不做）
+
+**只有用户说「总结 / 概括 / 归纳 / 提炼」才会触发**，普通翻译请求不会顺手多出一步。
+
+```
+paper_summary_brief  →  paper_summary_write  →  paper_summary_doc
+   切素材包 8–10k 字符      五节 + 证据，六项校验      【总结】DOCX/PDF
+```
+
+- 五节：研究目的 / 研究方法 / 研究难点 / 创新点 / 局限，合计 370–710 字
+- 每节附一句原文证据，`paper_summary_write` 会要求它**逐字命中原文**——编不出引文就过不了
+- 素材里确无依据时写「原文未明确说明」，不猜
+- 多篇：把多个 workdir 一起传给 `paper_summary_doc`，生成目录 + 每篇中英文名与五节
+- 成本：单篇约 3.5k token（摘要级，约为整篇翻译的 9%），20–40 秒
 
 ## 配置
 
@@ -101,7 +120,7 @@ paper_prepare  →  paper_terms  →  paper_next  ─┐
 ## 目录结构
 
 ```
-src/index.js     工具定义（9 个）
+src/index.js     工具定义（12 个）
 src/runner.js    spawn Python，UTF-8 与超时处理
 src/paths.js     路径解析（环境变量 → config → 内置默认）
 python/          解析、重建、校验流水线（从 paper-translate 技能同步）

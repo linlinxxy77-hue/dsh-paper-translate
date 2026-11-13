@@ -7,9 +7,15 @@
     python run.py finish <工作目录> [out.docx]       # 排版 → 自检（+ 可选导 PDF）
     python run.py harvest <工作目录>                 # 译完沉淀术语候选（补中文后 --merge）
 
+文献总结（默认不跑，用户提到「总结/概括」时才用）:
+    python run.py summary <工作目录>                 # 切素材包，交给模型写五节
+    python run.py summary-check <工作目录>           # 校验 summary.json（六项）
+    python run.py summary-doc <工作目录...> [-o out.docx] [--pdf]
+
 prepare 成功后会直接打印下一步该敲的命令，不需要再看中间产物。
 依赖缺失时以退出码 2 结束，并原样转达 env_check 的安装清单 —— 不会擅自安装。
 """
+import json
 import os
 import re
 import subprocess
@@ -147,6 +153,106 @@ def to_pdf(docx):
     return rc
 
 
+# ------------------------------------------------------------- 文献总结
+BAD_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]')
+
+
+def sanitize(name, limit=80):
+    """文件名清理：Windows 非法字符 + 全角冒号，超长截断。"""
+    name = BAD_CHARS.sub("", name or "").replace("：", " ").strip()
+    return name[:limit].strip(" .") or "文献"
+
+
+def pick_stem(workdir):
+    """单篇的文件名主干：优先沿用已有译文名，其次用中文标题，最后用目录名。"""
+    sp = os.path.join(workdir, "summary.json")
+    zh = ""
+    if os.path.exists(sp):
+        try:
+            zh = (json.load(open(sp, encoding="utf-8")).get("title_zh") or "").strip()
+        except Exception:
+            zh = ""
+    try:
+        docs = [f for f in os.listdir(workdir)
+                if f.lower().endswith(".docx") and "总结" not in f and not f.startswith("~$")]
+    except OSError:
+        docs = []
+    zh_docs = [f for f in docs if "译文" in f]
+    if zh_docs:
+        newest = max(zh_docs, key=lambda f: os.path.getmtime(os.path.join(workdir, f)))
+        return os.path.splitext(newest)[0]
+    if zh:
+        return sanitize(zh)
+    if docs:
+        newest = max(docs, key=lambda f: os.path.getmtime(os.path.join(workdir, f)))
+        return os.path.splitext(newest)[0]
+    return sanitize(os.path.basename(os.path.abspath(workdir)))
+
+
+def summary_pack(workdir, extra=()):
+    cpath = os.path.join(workdir, "content.json")
+    if not os.path.exists(os.path.join(workdir, "structure.json")):
+        print("! 找不到 structure.json，先跑 prepare。")
+        return 2
+    rc, out = call("summarize.py", workdir, "--pack", *extra)
+    print(out.rstrip())
+    if rc == 0:
+        print("\n下一步：把模型输出的 JSON 原样写入 "
+              f"{os.path.join(workdir, 'summary.json')}，再跑 summary-check。")
+    return rc
+
+
+def summary_check(workdir):
+    rc, out = call("summarize.py", workdir, "--check")
+    print(out.rstrip())
+    return rc
+
+
+def summary_doc(workdirs, out=None, want_pdf=False):
+    if not workdirs:
+        print("usage: run.py summary-doc <workdir> [<workdir> ...] [-o out.docx] [--pdf]")
+        return 1
+    missing = [d for d in workdirs if not os.path.exists(os.path.join(d, "summary.json"))]
+    if missing:
+        print("! 这些目录还没有 summary.json：")
+        for d in missing:
+            print("   ", d)
+        return 2
+    hard = 0
+    for d in workdirs:
+        rc, res = call("summarize.py", d, "--check")
+        if rc == 2:
+            hard += 1
+            print(f"[{os.path.basename(os.path.abspath(d))}] {res.rstrip()}")
+        elif rc == 1:
+            print(f"[{os.path.basename(os.path.abspath(d))}] 有疑点（不影响排版）")
+    if hard:
+        print("\n[停] 有总结未通过必检项，先改 summary.json 再排版。")
+        return 2
+
+    if not out:
+        if len(workdirs) == 1:
+            out = os.path.join(workdirs[0], pick_stem(workdirs[0]) + "【总结】.docx")
+        else:
+            common = os.path.commonpath([os.path.abspath(d) for d in workdirs])
+            base = os.path.basename(common.rstrip("\\/")) or ""
+            if base.lower() in ("build", "output", "out", "tmp", "temp", "work", "dist", "test", ""):
+                base = f"文献总结_{len(workdirs)}篇"
+            out = os.path.join(common, sanitize(base) + "【总结】.docx")
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    rc, res = call("build_summary.py", out, *workdirs)
+    print(res.rstrip())
+    if rc != 0:
+        return rc
+    print(f"\n交付: {os.path.abspath(out)}（{len(workdirs)} 篇）")
+    if want_pdf:
+        if to_pdf(out) == 0:
+            print("PDF 已生成。")
+        else:
+            print("! PDF 导出失败，docx 仍可用。")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     if not argv:
@@ -183,6 +289,31 @@ def main():
             print("usage: run.py harvest <workdir> [--top 15]")
             return 1
         return harvest(argv[1], tuple(argv[2:]))
+    if cmd == "summary":
+        if len(argv) < 2:
+            print("usage: run.py summary <workdir> [--budget 10000]")
+            return 1
+        return summary_pack(argv[1], tuple(argv[2:]))
+    if cmd == "summary-check":
+        if len(argv) < 2:
+            print("usage: run.py summary-check <workdir>")
+            return 1
+        return summary_check(argv[1])
+    if cmd == "summary-doc":
+        rest, out, want_pdf = [], None, False
+        i = 1
+        while i < len(argv):
+            a = argv[i]
+            if a in ("-o", "--out") and i + 1 < len(argv):
+                out = argv[i + 1]
+                i += 2
+                continue
+            if a == "--pdf":
+                want_pdf = True
+            elif not a.startswith("-"):
+                rest.append(a)
+            i += 1
+        return summary_doc(rest, out, want_pdf)
     print(__doc__)
     return 1
 
