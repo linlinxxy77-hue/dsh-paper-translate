@@ -23,7 +23,57 @@
 
 ## 安装
 
-### 1. 安装插件
+### 给 Agent 的安装步骤（用户发来本仓库网址让你安装时，照此执行）
+
+如果你是一个 AI Agent，用户把本仓库的 GitHub 网址（`github.com/linlinxxy77-hue/dsh-paper-translate`）发给你并让你安装，请**按下面顺序执行**，不要自行改命令：
+
+1. **确认前置**：用户已装 DeepSeek Harness 和 Python 3.10+（安装 Python 时勾选 Add to PATH）。
+
+2. **安装插件本体**（在用户电脑上执行这一条，会自动装 npm 包并写入 bundles 配置）：
+
+   ```bash
+   dsh plugin --profile desktop add dsh-paper-translate
+   ```
+
+   如果 `dsh` 命令不在 PATH，它位于 DSH 安装目录的 `resources/runtime/cli/bin/dsh.cmd`，用完整路径调用。
+
+3. **让用户完全退出并重开 Harness**（不是刷新窗口）。
+
+4. **安装 Python 依赖**（在插件目录执行，装进插件自己的 `.venv`，不污染全局）：
+
+   ```bash
+   cd %USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-paper-translate
+   python python\env_check.py --root . --venv .venv --bootstrap
+   ```
+
+5. **验证**：让用户说「检查论文翻译环境」，运行 `paper_doctor`，返回「环境就绪」即成功。
+
+详细排查清单见 [AGENTS.md](AGENTS.md)。
+
+---
+
+### 给人看的安装说明
+
+#### 0. 一键安装（Windows，推荐）
+
+从仓库下载 `scripts/` 里的两个文件到同一目录，**双击 `双击安装.bat`**，脚本会自动完成：装插件 → 装 Python 依赖 → 提示验证，无需打开终端。
+
+```text
+scripts/双击安装.bat     # 双击运行
+scripts/一键安装.ps1     # 实际安装逻辑（bat 会自动调用它）
+```
+
+### 1. 安装插件（命令行方式）
+
+**方式 A —— 用 dsh 命令（推荐，自动对账 bundles）：**
+
+```bash
+dsh plugin --profile desktop add dsh-paper-translate
+```
+
+这条命令会自动把插件装进 profile，并写入 `dsh.profile.bundles`，不用手动改配置文件。
+
+**方式 B —— 用 pnpm 手动装：**
 
 ```bash
 cd ~/.dsh/profiles/desktop          # Windows: %USERPROFILE%\.dsh\profiles\desktop
