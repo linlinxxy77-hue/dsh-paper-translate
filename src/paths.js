@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,8 +12,15 @@ const has = (file) => {
   }
 };
 
-// 每次现读，改 config.json 不需要重启 Harness。
-export function config() {
+// 设置界面（宿主 Config）与前端面板的实时值：每次现读，改完不必重启。
+let liveSource = null;
+
+export function setConfigSource(fn) {
+  liveSource = typeof fn === 'function' ? fn : null;
+}
+
+// config.json 是文件兜底：没装设置界面、或用命令行直接跑时仍能配置。
+function fileConfig() {
   try {
     return JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
   } catch {
@@ -22,11 +28,38 @@ export function config() {
   }
 }
 
+// 设置页未填的字段是空字符串，不能让它盖掉 config.json 里的真实配置。
+export function config() {
+  const merged = { ...fileConfig() };
+  let live = {};
+  try {
+    const value = liveSource?.();
+    if (value && typeof value === 'object') live = value;
+  } catch {
+    live = {};
+  }
+  for (const [key, value] of Object.entries(live)) {
+    if (value !== '' && value !== null && value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
+
+// 产物目录：环境变量 > 面板保存值 > 设置页 Config / config.json > <工作根>/translate_result。
+// 目录不存在就建；建不出来直接抛错，不静默落回旧位置——否则用户会以为设置生效了。
+export function outputDir() {
+  const saved = readState().outputDir;
+  const explicit = process.env.DSH_PAPER_OUTPUT || saved || config().outputDir;
+  const dir = explicit ? path.resolve(String(explicit)) : path.join(projectRoot(), 'translate_result');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 // 用户数据根：论文工作目录与默认输出都在它下面。
+// 没有显式配置时退到插件所在目录的旁边（项目文件夹内），不写系统盘的用户目录。
 export function projectRoot() {
   const explicit = process.env.DSH_PAPER_PROJECT || config().projectRoot;
   if (explicit) return path.resolve(explicit);
-  return path.join(os.homedir(), 'paper-translate-work');
+  return path.join(path.dirname(root), 'paper-translate-work');
 }
 
 // Python 脚本目录：插件自带副本优先，保证行为可复现；

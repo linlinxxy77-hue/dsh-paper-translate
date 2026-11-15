@@ -19,6 +19,12 @@ import sys
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import journal as J  # noqa: E402  —— 过程记录，见 journal.py
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 # 允许用环境变量指定项目自己的词表（测试与多项目共用时有用）
 TERMS = os.environ.get("PAPER_TRANSLATE_TERMS") or \
     os.path.join(os.path.dirname(HERE), "references", "terms.md")
@@ -89,23 +95,77 @@ def norm(s):
     return re.sub(r"\s+", " ", s)
 
 
+# 词边界：两侧都不能是字母；左边还排掉数字与撇号 —— 否则 UTR 会在「5′UTR」「3′UTR」里
+# 各命中一次，于是正文老老实实写 5′UTR 反而被判「没用非翻译区这个译名」。
+# 只排数字与 ′，不排连字符：RT-qPCR 里的 qPCR 仍应算命中。
+# 右边同样要排数字：SD 在毒株名 SD93 里、ORF 在 ORF2 里都是专名，不是术语本体
+# （报告 P2-3：SD93 被当成 standard deviation 的 SD 误报）。
+BD_L = r"(?<![A-Za-z0-9′'’])"
+BD_R = r"(?![A-Za-z0-9])"
+
+
 def count_hits(text, term):
+    """单条术语的命中数。批量场景请用 TermMatcher —— 逐条调用是 N 次全文扫描。"""
     n = 0
     for v in term["variants"]:
-        pat = r"(?<![A-Za-z])" + re.escape(norm(v)) + r"(?![A-Za-z])"
+        pat = BD_L + re.escape(norm(v)) + BD_R
         n += len(re.findall(pat, text, re.I))
     return n
+
+
+class TermMatcher:
+    """一次扫描统计全部术语的命中数。
+
+    逐条 count_hits 意味着 N 条词表 = N 次全文正则：5 万字符的正文、1000 条词表
+    要 2.4 秒，2000 条要 4.7 秒，而素材包每次生成都要跑一遍。把全部变体合成一条
+    正则扫一遍，同样输入只需 0.24 / 0.48 秒。
+
+    三个讲究：
+    - 变体按长度降序进正则：`UTR` 也能从 `5′UTR` 的前缀处起匹配，短的先试会把长的切走。
+    - 用零宽断言 `(?=...)` 而不是直接匹配：直接匹配会消耗字符，`agarose gel` 吃掉
+      「gel」之后，紧随的 `gel electrophoresis` 就匹配不到了，命中数会无端变少。
+      断言不消耗，跨术语的重叠得以保留，与逐条统计的口径一致。
+    - 变体过多时交替分支太长，按 BATCH 分批扫再合并，编译与匹配都稳。
+    """
+
+    BATCH = 400
+
+    def __init__(self, terms):
+        self.terms = terms
+        self.index = {}                      # 变体（小写）→ 术语下标
+        variants = []
+        for i, t in enumerate(terms):
+            for v in t["variants"]:
+                v = norm(v)
+                if v and v.lower() not in self.index:
+                    self.index[v.lower()] = i
+                    variants.append(v)
+        variants.sort(key=len, reverse=True)
+        self.pats = [
+            re.compile(r"(?=" + BD_L + r"("
+                       + "|".join(re.escape(v) for v in variants[k:k + self.BATCH])
+                       + r")" + BD_R + r")", re.I)
+            for k in range(0, len(variants), self.BATCH)
+        ]
+
+    def counts(self, text):
+        """{术语下标: 命中次数}，只保留 ≥1 的。"""
+        out = {}
+        text = norm(text or "")
+        for pat in self.pats:
+            for m in pat.finditer(text):
+                i = self.index.get(m.group(1).lower())
+                if i is not None:
+                    out[i] = out.get(i, 0) + 1
+        return out
 
 
 def do_structure(path, out_json):
     st = json.load(open(path, encoding="utf-8"))
     text = norm("\n".join(b["text"] for b in st["blocks"]))
-    rows = []
-    for t in load_terms():
-        n = count_hits(text, t)
-        if n:
-            rows.append({"en": t["en"], "zh": t["zh"], "note": t["note"], "count": n})
-    rows.sort(key=lambda r: -r["count"])
+    terms = load_terms()
+    rows = [{"en": terms[i]["en"], "zh": terms[i]["zh"], "note": terms[i]["note"], "count": n}
+            for i, n in sorted(TermMatcher(terms).counts(text).items(), key=lambda x: -x[1])]
     if not rows:
         print("词表未命中任何术语（references/terms.md 可自行扩充）")
         return 0
@@ -126,6 +186,92 @@ def primary_zh(term):
     return re.sub(r"（[^）]*）|\([^)]*\)", "", zh).strip()
 
 
+def keep_original(term):
+    """这条术语是否「照原文写」（译成中文反而不准，或本来就是原文写法）。
+
+    两类算：说明列标了「原文照写」的（5′UTR、poly(A) 这类区域/元件缩写），
+    中文列与英文列相同的（spike-in）。后一种是词表里既有的写法，
+    拼写没变就不必再补标记。
+
+    为什么需要它：不一致检查默认「原文出现过的术语，译文必须用约定中文名」，
+    对 5′UTR 这种本该照原文写的词会误判成术语漂移 —— 译对了反而报警。
+    """
+    if "原文照写" in (term.get("note") or ""):
+        return True
+    zh = (term.get("zh") or "").strip()
+    en = re.split(r"\s*/\s*", term.get("en") or "")[0].strip()
+    return bool(zh) and zh.lower() == en.lower()
+
+
+def abbr_of(term):
+    """说明列写「缩写保留 X」时取出 X。没写返回空串。
+
+    词表里有 17 条这种条目（ORF / SD / IRES / MFE / ANOVA …），说明列明确
+    允许正文只写缩写。检查器以前不读这一列，于是模型按规范保留 ORF 就被报
+    「未使用约定译名」—— 词表与检查器自相矛盾，52 条告警里 26 条出在这里。
+    """
+    note = term.get("note") or ""
+    # 只取以字母开头的 token：「保留 Kozak」与「缩写保留 ORF」都命中，
+    # 「保留原文」（后面是汉字）不会误命中。
+    m = re.search(r"保留\s*([A-Za-z][A-Za-z0-9′'\-]*)", note)
+    return m.group(1).strip() if m else ""
+
+
+def zh_candidates(term):
+    """中文列的候选写法：按「/」切分并去括注。
+
+    中文列写「Kozak 序列 / Kozak 得分」「骨架 / 主链」时，两种都算对。以前只取
+    primary_zh（「/」前那段），模型用了后一种就被判漂移，而词表本身承认它是译名。
+    """
+    out = []
+    for part in re.split(r"\s*/\s*", term.get("zh") or ""):
+        p = re.sub(r"（[^）]*）|\([^)]*\)", "", part).strip()
+        if p:
+            out.append(p)
+    return out
+
+
+def term_status(term, text):
+    """译文里这条术语算不算缺。返回 None（通过）/ "keep" / "drift"。
+
+    统一判据 —— do_check（译后自检）与 fill.py（逐批回填）共用同一份。以前
+    fill.py 另写了一套，只看 primary_zh 有没有出现，于是：
+      · 说明列写「缩写保留 ORF」，模型保留 ORF → 报漂移（自相矛盾）
+      · 「原文照写」的 5′UTR / poly(A)，模型照原文写 → 报漂移
+      · 中文列有两个译名，模型用了第二个 → 报漂移
+      · 短词（template、promoter）中文写法本就不唯一 → 报漂移
+    两份口径并存还会出现「自检说没问题、回填说漂移」的打架，与 lexicon.py 里
+    EN_KEEP 曾分两份是同一类错。
+
+    四类放行，顺序有意：先判"本来就不该用中文"的，再判"用了别的写法也算对"的，
+    最后才要求约定译名出现。
+    """
+    text = norm(text or "")
+    low = text.lower()
+    zh = zh_candidates(term)
+    en = term.get("en") or ""
+    hit_zh = any(z in text for z in zh)
+
+    # 1 原文照写（5′UTR、poly(A)、spike-in）：原文写法或任一译名出现即可
+    if keep_original(term):
+        hit_en = any(norm(v).lower() in low for v in term["variants"])
+        return None if (hit_en or hit_zh) else "keep"
+
+    # 2 说明列「缩写保留 X」：X 或任一译名出现即可
+    ab = abbr_of(term)
+    if ab and ab in text:
+        return None
+    if hit_zh:
+        return None
+
+    # 3 短词的中文写法本就不唯一（template→模板/模版），强行比对只会误报
+    if " " not in en and "-" not in en and len(en) < 10:
+        return None
+
+    # 4 其余：约定译名必须出现
+    return "drift" if zh else None
+
+
 def do_check(path):
     C = json.load(open(path, encoding="utf-8"))
     text = norm("\n".join(
@@ -137,19 +283,32 @@ def do_check(path):
         S = json.load(open(sp, encoding="utf-8"))
         src = norm("\n".join(m.get("src") or "" for m in S["items"].values()))
     bad = []
-    for t in load_terms():
-        n_src = count_hits(src, t) if src else 0
-        if not n_src:
-            continue
-        zh = primary_zh(t)
-        if zh and zh not in text:
-            bad.append((t["en"], zh, n_src))
+    terms = load_terms()
+    for i, n_src in sorted((TermMatcher(terms).counts(src) if src else {}).items(),
+                           key=lambda x: -x[1]):
+        t = terms[i]
+        st = term_status(t, text)
+        if st:
+            bad.append({"en": t["en"], "zh": primary_zh(t), "n": n_src,
+                        "keep": st == "keep"})
+    work = os.path.dirname(os.path.abspath(path))
+    for b in bad:
+        if b["keep"]:
+            J.issue(work, "glossary", "TERM_DRIFT", b["en"],
+                    f"原文 {b['n']} 次，译文中既无原文写法也无译名",
+                    f"该照原文写却整处缺失：{b['en']}")
+        else:
+            J.issue(work, "glossary", "TERM_DRIFT", b["en"],
+                    f"原文 {b['n']} 次，应译作「{b['zh']}」", f"未使用约定译名：{b['en']}")
     if not bad:
         print("术语一致性：OK（原文出现的词表术语，译文都用了约定译名）")
         return 0
     print("[告警] 以下术语原文出现过，但译文未使用约定译名：")
-    for en, zh, n in bad:
-        print(f"  - {en}（原文 {n} 次） 应译作「{zh}」")
+    for b in bad:
+        if b["keep"]:
+            print(f"  - {b['en']}（原文 {b['n']} 次） 应按原文写，译文里整处没出现")
+        else:
+            print(f"  - {b['en']}（原文 {b['n']} 次） 应译作「{b['zh']}」")
     return 1
 
 

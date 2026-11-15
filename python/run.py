@@ -11,8 +11,14 @@
 
 文献总结（默认不跑，用户提到「总结/概括」时才用）:
     python run.py summary <工作目录> [--figs 3]      # 切素材包（含图注候选），交给模型写五节
+    python run.py summary-grep <工作目录> <关键词>     # 按关键词回原文捞句子（素材包漏了用它补）
+    python run.py summary-fig <工作目录> <图号>        # 展开该图完整图注（候选池外的也能取）
     python run.py summary-check <工作目录>           # 校验 summary.json（六项）
     python run.py summary-doc <工作目录...> [-o out.docx] [--pdf]
+
+过程记录:
+    python run.py journal <工作目录> [--issues|--timing|--decisions|--tail|--runs] [--last]
+                                                     # --timing 是累计口径；加 --last 只算最后一次运行
 
 prepare 成功后会直接打印下一步该敲的命令，不需要再看中间产物。
 依赖缺失时以退出码 2 结束，并原样转达 env_check 的安装清单 —— 不会擅自安装。
@@ -24,6 +30,10 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import journal as J  # noqa: E402  —— 过程记录，见 journal.py
 
 
 def call(script, *args):
@@ -50,16 +60,24 @@ def prepare(pdf, work, mode="translate", nocrop=False):
     summary_only = mode == "summary"
     steps = 2 if (summary_only and nocrop) else 3 if summary_only else 4
 
-    rc, out = call("env_check.py")
+    # 一次处理流程的起点：日志里按这条事件划时间窗，方便看「这次跑」的耗时分布
+    J.append(work, "prepare", "run.py", "info", code="RUN_START",
+             detail=f"mode={mode} nocrop={nocrop} pdf={os.path.basename(pdf)}")
+
+    with J.timed("env_check", work, "env_check.py"):
+        rc, out = call("env_check.py")
     if rc != 0:
+        J.issue(work, "env_check", "ENV_MISSING", detail=out.strip()[-300:], msg="依赖未就绪")
         print(out.strip())
         print("\n[停] 依赖未就绪，先按上面的清单处理，再重跑 prepare。")
         return 2
     py = line_with(out, "PYTHON")
     print(f"[1/{steps}] 环境 OK ", py.replace("PYTHON", "").strip())
 
-    rc, out = call("extract.py", pdf, work)
+    with J.timed("extract", work, "extract.py"):
+        rc, out = call("extract.py", pdf, work)
     if rc != 0:
+        J.issue(work, "extract", "EXTRACT_FAIL", detail=out.strip()[-300:], msg="PDF 抽取失败")
         print(out.strip())
         return 3
     stats = line_with(out, "\"blocks\"")
@@ -70,8 +88,10 @@ def prepare(pdf, work, mode="translate", nocrop=False):
     if summary_only:
         print("      （仅总结模式：不生成待译项，也就不走全文翻译）")
     else:
-        rc, out = call("make_skeleton.py", spath, cpath)
+        with J.timed("skeleton", work, "make_skeleton.py"):
+            rc, out = call("make_skeleton.py", spath, cpath)
         if rc != 0:
+            J.issue(work, "skeleton", "SKELETON_FAIL", detail=out.strip()[-300:], msg="译文骨架生成失败")
             print(out.strip())
             return 4
         todo = line_with(out, "待翻译").replace("待翻译:", "").split("；")[0].strip()
@@ -81,8 +101,10 @@ def prepare(pdf, work, mode="translate", nocrop=False):
     if nocrop:
         print("       （--no-crop：跳过裁图，纯文字总结更快）")
     else:
-        rc, out = call("crop_figs.py", pdf, spath, os.path.join(work, "figs"))
+        with J.timed("crop", work, "crop_figs.py"):
+            rc, out = call("crop_figs.py", pdf, spath, os.path.join(work, "figs"))
         if rc != 0:
+            J.issue(work, "crop", "CROP_FAIL", detail=out.strip()[-300:], msg="裁图失败")
             print(out.strip())
             return 5
         crop = line_with(out, "crop:")
@@ -90,6 +112,7 @@ def prepare(pdf, work, mode="translate", nocrop=False):
         warn = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("!")]
         for w in warn:
             print("      ", w)
+            J.issue(work, "crop", "CROP_WARN", detail=w.lstrip("! "), msg=w.lstrip("! "))
 
     print(f"\n工作目录: {os.path.abspath(work)}")
     if summary_only:
@@ -102,6 +125,11 @@ def prepare(pdf, work, mode="translate", nocrop=False):
     return 0
 
 
+def out_dir():
+    """壳侧通过环境变量指定的产物目录（来自设置页）。空表示沿用旧位置。"""
+    return (os.environ.get("PAPER_TRANSLATE_OUT") or "").strip()
+
+
 def finish(work, out_docx=None):
     cpath = os.path.join(work, "content.json")
     if not os.path.exists(cpath):
@@ -109,9 +137,12 @@ def finish(work, out_docx=None):
         return 1
     rc, out = (0, "")
     if os.path.exists(os.path.join(work, "source.json")):
-        rc, out = call("fill.py", cpath, "--status")
+        with J.timed("fill_status", work, "fill.py"):
+            rc, out = call("fill.py", cpath, "--status")
         print("[0/2] 进度   ", line_with(out, "合计").strip() or "未知")
         if rc != 0:
+            J.issue(work, "finish", "TODO_LEFT", detail=line_with(out, "合计").strip(),
+                    msg="还有未译项，已拦下排版")
             print(out.strip())
             print("\n[停] 还有未译项。先 fill.py --next 继续，或确认要跳过再重跑。")
             return 2
@@ -119,14 +150,22 @@ def finish(work, out_docx=None):
         print("[0/2] 进度   跳过（无 source.json，按已填项直接排版）")
 
     figs = os.path.join(work, "figs")
-    docx = out_docx or os.path.join(work, "译文.docx")
-    rc, out = call("build_docx.py", cpath, figs, docx)
+    if not out_docx:
+        dest = out_dir()
+        stem = sanitize(os.path.basename(os.path.abspath(work))) or "paper"
+        out_docx = os.path.join(dest, stem + "译文.docx") if dest else os.path.join(work, "译文.docx")
+    docx = out_docx
+    os.makedirs(os.path.dirname(os.path.abspath(docx)) or ".", exist_ok=True)
+    with J.timed("build", work, "build_docx.py"):
+        rc, out = call("build_docx.py", cpath, figs, docx)
     if rc != 0:
+        J.issue(work, "build", "BUILD_FAIL", detail=out.strip()[-300:], msg="排版失败")
         print(out.strip())
         return 3
     print("[1/2] 排版   ", line_with(out, "saved") or docx)
 
-    rc, out = call("verify.py", cpath, figs, docx)
+    with J.timed("verify", work, "verify.py"):
+        rc, out = call("verify.py", cpath, figs, docx)
     print("[2/2] 自检")
     print(out.rstrip())
     if rc == 0:
@@ -210,8 +249,11 @@ def summary_pack(workdir, extra=()):
     if not os.path.exists(os.path.join(workdir, "structure.json")):
         print("! 找不到 structure.json，先跑 prepare。")
         return 2
-    rc, out = call("summarize.py", workdir, "--pack", *extra)
+    with J.timed("summary_pack", workdir, "summarize.py"):
+        rc, out = call("summarize.py", workdir, "--pack", *extra)
     print(out.rstrip())
+    if rc != 0:
+        J.issue(workdir, "summary_pack", "PACK_FAIL", detail=out.strip()[-300:], msg="素材包生成失败")
     if rc == 0:
         print("\n下一步：把模型输出的 JSON 原样写入 "
               f"{os.path.join(workdir, 'summary.json')}，再跑 summary-check。")
@@ -219,7 +261,8 @@ def summary_pack(workdir, extra=()):
 
 
 def summary_check(workdir):
-    rc, out = call("summarize.py", workdir, "--check")
+    with J.timed("summary_check", workdir, "summarize.py"):
+        rc, out = call("summarize.py", workdir, "--check")
     print(out.rstrip())
     return rc
 
@@ -246,25 +289,34 @@ def summary_doc(workdirs, out=None, want_pdf=False):
         print("\n[停] 有总结未通过必检项，先改 summary.json 再排版。")
         return 2
 
+    dest = out_dir()
     if not out:
         if len(workdirs) == 1:
-            out = os.path.join(workdirs[0], pick_stem(workdirs[0]) + "【总结】.docx")
+            out = os.path.join(dest or workdirs[0], pick_stem(workdirs[0]) + "【总结】.docx")
         else:
             common = os.path.commonpath([os.path.abspath(d) for d in workdirs])
             base = os.path.basename(common.rstrip("\\/")) or ""
             if base.lower() in ("build", "output", "out", "tmp", "temp", "work", "dist", "test", ""):
                 base = f"文献总结_{len(workdirs)}篇"
-            out = os.path.join(common, sanitize(base) + "【总结】.docx")
+            out = os.path.join(dest or common, sanitize(base) + "【总结】.docx")
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
-    rc, res = call("build_summary.py", out, *workdirs)
+    # 排版与导 PDF 都记在首个工作目录上：多篇合并时它们是一次调用的两个阶段，
+    # 分摊到各篇反而失真。之前漏了这两段，耗时表里「生成文档」永远是空的。
+    with J.timed("build_docx", workdirs[0], "build_summary.py") as t:
+        rc, res = call("build_summary.py", out, *workdirs)
     print(res.rstrip())
     if rc != 0:
+        J.issue(workdirs[0], "summary_doc", "BUILD_FAIL",
+                detail=res.strip()[-300:], msg="排版失败", level="error")
         return rc
     print(f"\n交付: {os.path.abspath(out)}（{len(workdirs)} 篇）")
     if want_pdf:
-        if to_pdf(out) == 0:
+        with J.timed("pdf_export", workdirs[0], "to_pdf"):
+            pdf_rc = to_pdf(out)
+        if pdf_rc == 0:
             print("PDF 已生成。")
         else:
+            J.issue(workdirs[0], "summary_doc", "PDF_FAIL", msg="PDF 导出失败，docx 仍可用")
             print("! PDF 导出失败，docx 仍可用。")
     return 0
 
@@ -299,11 +351,30 @@ def main():
             print("usage: run.py finish <workdir> [out.docx]")
             return 1
         return finish(argv[1], argv[2] if len(argv) > 2 else None)
+    if cmd == "journal":
+        if len(argv) < 2:
+            print("usage: run.py journal <workdir> [--issues|--timing|--decisions|--tail|--runs|--e2e] [--last]")
+            return 1
+        what = "summary"
+        for flag, name in (("--issues", "issues"), ("--timing", "timing"),
+                           ("--decisions", "decisions"), ("--tail", "tail"),
+                           ("--runs", "runs"), ("--e2e", "e2e")):
+            if flag in argv[2:]:
+                what = name
+        print(J.report(argv[1], what, "--last" in argv[2:]))
+        return 0
     if cmd == "pdf":
         if len(argv) < 2:
             print("usage: run.py pdf <docx>")
             return 1
         return to_pdf(argv[1])
+    if cmd in ("consistency", "consist"):
+        if len(argv) < 2:
+            print("usage: run.py consistency <workdir|content.json> [更多…] [--json] [--strict]")
+            return 1
+        rc, out = call("consistency.py", *argv[1:])
+        print(out.rstrip())
+        return rc
     if cmd == "audit":
         if len(argv) < 2:
             print("usage: run.py audit <workdir> [n] [--seq 12,34] [--list]")
@@ -321,9 +392,23 @@ def main():
         return harvest(argv[1], tuple(argv[2:]))
     if cmd == "summary":
         if len(argv) < 2:
-            print("usage: run.py summary <workdir> [--budget 10000]")
+            print("usage: run.py summary <workdir> [--budget 12000]")
             return 1
         return summary_pack(argv[1], tuple(argv[2:]))
+    if cmd in ("summary-grep", "grep"):
+        if len(argv) < 3:
+            print('usage: run.py summary-grep <workdir> <关键词或正则> [--limit 20] [--sec results,discussion]')
+            return 1
+        rc, out = call("summarize.py", argv[1], "--grep", argv[2], *argv[3:])
+        print(out.rstrip())
+        return rc
+    if cmd in ("summary-fig", "fig"):
+        if len(argv) < 3:
+            print("usage: run.py summary-fig <workdir> <图号>   # 展开完整图注 + 正文引用")
+            return 1
+        rc, out = call("summarize.py", argv[1], "--fig", argv[2])
+        print(out.rstrip())
+        return rc
     if cmd == "summary-check":
         if len(argv) < 2:
             print("usage: run.py summary-check <workdir>")

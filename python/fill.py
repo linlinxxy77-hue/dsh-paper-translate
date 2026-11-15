@@ -25,12 +25,14 @@ import json
 import os
 import re
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import glossary as G            # noqa: E402  术语口径（跨批次一致）
-from verify import key_nums     # noqa: E402  数字比对（与交付自检同一套判据）
+import journal as J             # noqa: E402  过程记录：本批发现的问题当场落盘
+from verify import key_nums, keep_original_text  # noqa: E402  数字比对 + 保留原文判定（与交付自检同一套判据）
 
 HDR = re.compile(r"^@@\s*(\d+)\s*$")
 CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -185,12 +187,14 @@ def item_dst(item):
 
 
 def do_fill(C, S, path, dry, cpath):
+    t0 = time.perf_counter()
+    work = os.path.dirname(os.path.abspath(cpath))
     got = parse_batch(path)
     if not got:
         print("! 批文件里没有解析到任何 @@序号。检查格式：每条以单独一行 @@12 开头。")
         return 1
     applied, warns, nums, terms = [], [], [], []
-    srcs, dsts = [], []
+    srcs = []
     for idx, raw in sorted(got.items()):
         key = str(idx)
         if key not in S["items"]:
@@ -232,8 +236,11 @@ def do_fill(C, S, path, dry, cpath):
             continue
         else:
             item["text"] = cap or raw.strip()
-            if item["t"] in ("p", "h1", "h2", "title", "abstract") \
-                    and not CJK.search(item["text"]) and len(item["text"]) > 30:
+            # 论文标题也要译成中文（方案 A：此前 title 放行不译，导致所有篇标题都是英文）。
+            # 作者/单位/DOI 靠 keep_original_text 内容识别继续保留原文。
+            if item["t"] in ("title", "p", "h1", "h2", "abstract") \
+                    and not CJK.search(item["text"]) and len(item["text"]) > 30 \
+                    and not keep_original_text(meta.get("src") or ""):
                 warns.append(f"@@{idx} 未见中文，确认是否漏译")
         applied.append(idx)
 
@@ -243,17 +250,22 @@ def do_fill(C, S, path, dry, cpath):
         if lack:
             nums.append((idx, sorted(lack)))
         srcs.append(st)
-        dsts.append(dt)
 
-    # 整批查术语：只看本批原文出现过的术语，未用约定译名即报漂移
+    # 查术语：只看本批原文出现过的词。两处口径修正（详见 G.term_status 的说明）：
+    #   · 判据用 G.term_status，与译后自检共用 —— 以前这里另写一套「primary_zh 必须
+    #     出现在本批译文里」，把词表写明的「缩写保留 ORF」「原文照写 5′UTR」全判成漂移；
+    #   · 范围用全篇译文而非本批 —— 首现括注「中文（English）」只在全文第一次出现时
+    #     写，此后各批合法地只用缩写，按批判等于每一批都要重写一遍中文。
     if srcs:
-        s_all, d_all = "\n".join(srcs), "\n".join(dsts)
+        s_all = "\n".join(srcs)
+        whole = "\n".join(
+            (it.get("caption") or it.get("text") or "")
+            for it in (C.get("front") or []) + (C.get("body") or []) + (C.get("back") or []))
         for t in G.load_terms():
             if not G.count_hits(s_all, t):
                 continue
-            zh = G.primary_zh(t)
-            if zh and zh not in d_all:
-                terms.append((t["en"], zh))
+            if G.term_status(t, whole):
+                terms.append((t["en"], G.primary_zh(t) or G.abbr_of(t)))
 
     if not dry and applied:
         with open(cpath, "w", encoding="utf-8") as fh:
@@ -272,6 +284,21 @@ def do_fill(C, S, path, dry, cpath):
         print(f" （另有 {len(terms) - 8} 个术语未按约定译名）")
     if not dry:
         print("（建议接着跑 --status 确认进度）")
+
+    # 翻译侧当场发现的问题也落盘：数字缺项、术语漂移、格式告警。
+    # 这些在交付自检里会再报一次，但在 fill 阶段记下来才能知道「哪一批出的」
+    for w in warns:
+        J.issue(work, "fill", "FILL_WARN", detail=w, msg=w)
+    for idx, lack in nums:
+        J.issue(work, "fill", "NUM_MISMATCH", f"item {idx}", f"原文有而译文缺 {lack}",
+                "本批数字与原文不一致")
+    for en, zh in terms:
+        J.issue(work, "fill", "TERM_DRIFT", en, f"应译作「{zh}」", f"本批未用约定译名：{en}")
+    J.append(work, "fill", "fill.py", "timing", code="FILL_BATCH",
+             detail=f"写入 {len(applied)} 项｜告警 {len(warns)}｜数字 {len(nums)}｜术语 {len(terms)}"
+                    f"{'（dry-run）' if dry else ''}",
+             ms=(time.perf_counter() - t0) * 1000)
+
     return 0 if not (warns or nums) else 2
 
 

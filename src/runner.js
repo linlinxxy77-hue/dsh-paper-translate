@@ -1,7 +1,35 @@
 import { spawn } from 'node:child_process';
-import { pythonPath, skillDir, resolveScript } from './paths.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pythonPath, skillDir, resolveScript, dataDir } from './paths.js';
 
 const isWin = process.platform === 'win32';
+
+/**
+ * 记一次工具调用的墙钟耗时到 <data>/runs.jsonl。
+ *
+ * 为什么要在壳侧记：翻译真正慢的是模型读素材、写译文那一段，Python 进程只负责
+ * 输出待译项和写回结果，两次调用之间是空的。只看 Python 侧的 timing 会得出
+ * 「翻译只花几百毫秒」这种结论。这里记的是「从发起到返回」的真实等待，
+ * 相邻两次 fill 的 ts 之差就是模型侧花的时间。
+ */
+function logRun(entry) {
+  try {
+    const p = path.join(dataDir(), 'runs.jsonl');
+    try {
+      if (fs.statSync(p).size > 2 * 1024 * 1024) {
+        fs.renameSync(p, path.join(dataDir(), 'runs.1.jsonl'));
+      }
+    } catch {
+      /* 文件还不存在 */
+    }
+    // v=记录格式版本。v>=2 时 flags/path 必然存在（可能是空数组/空串）；
+    // 没有 v 的是早期记录，两个字段根本没写，读的时候要当「未知」而不是「空」。
+    fs.appendFileSync(p, JSON.stringify({ v: 2, ts: new Date().toISOString(), ...entry }) + '\n', 'utf8');
+  } catch {
+    /* 记日志失败不能影响主流程 */
+  }
+}
 
 function killTree(child) {
   if (!child || child.killed || child.exitCode !== null) return;
@@ -24,9 +52,10 @@ function killTree(child) {
  * 跑 skill 里的一个 Python 脚本，收 stdout/stderr。
  * 不解析业务语义，只保证：编码正确、超时可中断、不弹黑窗。
  */
-export function runPy(scriptName, args, { timeoutMs = 600000, signal } = {}) {
+export function runPy(scriptName, args, { timeoutMs = 600000, signal, env } = {}) {
   const py = pythonPath();
   const file = resolveScript(scriptName);
+  const t0 = Date.now();
   return new Promise((resolve) => {
     let child;
     try {
@@ -40,6 +69,8 @@ export function runPy(scriptName, args, { timeoutMs = 600000, signal } = {}) {
           PYTHONIOENCODING: 'utf-8',
           PYTHONUTF8: '1',
           PYTHONDONTWRITEBYTECODE: '1',
+          // 壳侧算好的产物目录：Python 不读 DSH 配置，只认这个变量。
+          ...(env || {}),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -58,6 +89,18 @@ export function runPy(scriptName, args, { timeoutMs = 600000, signal } = {}) {
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      logRun({
+        script: scriptName,
+        sub: (args || []).find((a) => typeof a === 'string' && !a.startsWith('-')) || '',
+        // 只记 sub 分不出「--timing」和「--timing --last」；参数留一份原样
+        flags: (args || []).filter((a) => typeof a === 'string' && a.startsWith('-')),
+        // 第一个带路径分隔符的参数：事后能认出这是哪篇（prepare 时是 pdf，其余是工作目录）
+        path: (args || []).find((a) => typeof a === 'string' && /[\\/]/.test(a)) || '',
+        code: result.code,
+        ms: Date.now() - t0,
+        timeout: Boolean(result.timedOut),
+        aborted: Boolean(result.aborted),
+      });
       resolve(result);
     };
 

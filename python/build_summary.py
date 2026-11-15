@@ -31,7 +31,8 @@ from build_docx import (BODY_PT, CN, CN_HEAD, EN, add_page_number, add_rich_text
 
 GRAY = RGBColor(0x59, 0x59, 0x59)
 LIGHT = RGBColor(0x80, 0x80, 0x80)
-SECTIONS = [("purpose", "研究目的"), ("methods", "研究方法"), ("difficulty", "研究难点"),
+SECTIONS = [("purpose", "研究目的"), ("methods", "研究方法"),
+            ("difficulty", "研究难点与解决方案"),
             ("novelty", "创新点"), ("limitation", "局限")]
 CN_NUM = "一二三四五六七八九十"
 IMG_W = 15.0          # 图片版心宽度上限（cm）
