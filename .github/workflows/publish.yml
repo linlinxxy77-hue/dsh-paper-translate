@@ -1,0 +1,48 @@
+name: Publish to npm
+
+# Trusted Publishing（OIDC）：打 tag 时自动发布到 npm，无需 token / OTP。
+# 触发条件：推送以 v 开头的 tag，例如 v0.1.3。
+#
+# 前置配置（一次性，在 npmjs.com 完成）：
+# 1. 打开包 dsh-paper-translate 的设置页：Packages → dsh-paper-translate → Settings → Trusted publishing
+# 2. 添加 Trusted Publisher，选 GitHub Actions，填写：
+#    - Organization or user: linlinxxy77-hue
+#    - Repository:           dsh-paper-translate
+#    - Workflow filename:    publish.yml
+#    - Environment name:     留空
+# 3. 在 "Allowed actions" 中勾选 "Allow npm publish"（否则只能 stage publish，无法直接上线）
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write   # 关键：允许 OIDC 向 npm 证明身份
+  contents: read
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag 版本 ($TAG_VERSION) 与 package.json 版本 ($PKG_VERSION) 不一致，请先更新 package.json 再打 tag。"
+            exit 1
+          fi
+          echo "版本一致：$TAG_VERSION"
+
+      - name: Publish to npm
+        run: npm publish --access public
